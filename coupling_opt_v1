@@ -1,0 +1,189 @@
+#%% import
+
+"Library imports" 
+
+import numpy as np
+import sympy as sp
+import scipy.optimize as opt
+import matplotlib.pyplot as plt
+import itertools #import itertools to create basis.
+from prettytable import PrettyTable
+from scipy.optimize import minimize
+np.set_printoptions(suppress=True)
+
+#%% build Hamiltonian
+
+"Construction of Hamiltonian"
+
+def create_basis(n_particles):
+    """
+    Creates an array of vectors with dimension n
+    which have entries of either 1/2 or -1/2.
+    """
+    #2 spin states, with n_particles spins, use itertools.product to output all 2^n combinations.
+    u = 0.50000000000000
+    d = -0.50000000000000
+    spin_states = [u, d]
+    basis = []
+    basis_all = np.array(list(itertools.product(spin_states, repeat=n_particles)))
+    for i in range(len(basis_all)):
+        if np.sum(basis_all[i]) == 0: #even spin centres (Ms = 0 determinants)
+            basis.append(basis_all[i])
+        if np.sum(basis_all[i]) == 0.5: #odd spin centres (Ms = 1/2 determinants)
+            basis.append(basis_all[i])
+    return basis
+
+
+def SiSj_diag(ket, i, j, J):
+    """
+    Calculates the diagonal bilinear matrix element.
+    """
+    return ket[i] * ket[j] * J[i,j]
+
+def SiSj_off_diag(bra, ket, i, j, J):
+    """
+    calculates the off-diagonal bilinear matrix element
+    """
+    flipped_ket = ket.copy()
+    flipped_ket[i] *= -1
+    flipped_ket[j] *= -1
+    if (bra == flipped_ket).all():
+        return 0.5 * J[i,j]
+    else: 
+        return 0
+
+def Biquartic_SiSj_diag (ket, i, j, lam):
+    """
+    Calculates the biquadratic exchange term of diagonal bilinear matrix element.
+    """
+    return (ket[i] * ket[j])**2 * lam[i,j]
+
+def Biquadratic_SiSj_off_diag(bra, ket, i, j, lam):
+    """
+    Calculates the biquadratic exchange term of off-diagonal bilinear matrix element.
+    """
+    ket[i] = ket[i] * -1
+    ket[j] = ket[j] * -1
+    if (bra == ket).all(): 
+        return 0.5 * lam[i,j]
+    else:
+        return 0
+
+def build_ham(basis, J, n_particles, Ham_type):
+    """
+    Constructs the Hamiltonian.
+    """
+    ham = np.zeros((len(basis), len(basis)))
+    Ham_type = Ham_type.lower()
+    
+    if Ham_type == "heisenburg":
+        # Off-diagonal terms
+        for ham_row, bra in enumerate(basis):
+            for ham_col, ket in enumerate(basis[ham_row + 1:], start=ham_row + 1):
+                for i in range(n_particles):
+                    for j in range(i + 1, n_particles):
+                        ham[ham_row, ham_col] += SiSj_off_diag(bra, ket.copy(), i, j, J)
+        ham += ham.T  # Make symmetric
+    elif Ham_type == "ising":
+        pass 
+
+    # Diagonal terms
+    for ham_row, ket in enumerate(basis):
+        for i in range(n_particles):
+            for j in range(i + 1, n_particles):
+                ham[ham_row, ham_row] += SiSj_diag(ket, i, j, J)
+    return ham
+
+
+#%% 
+
+#%% 
+
+"Creation of J matrix"
+n_particles = 3 # number of particles
+
+#cm2mev = 0.124 - for cm-1 output
+#exchange coupling in meV
+Jout = 1.95 
+#Jin = 139.124944
+Jin = 200.67
+Jin2 = 208.145663
+Jin3 = 131.729393
+
+def High_Spin_coupling(Jin, Jout, n_particles, structure):
+    J = np.zeros((n_particles, n_particles))
+    if structure == "dimer":
+        for i in range(int(n_particles/2)):
+            for j in range(i + 1, int(n_particles/2)):
+                J[i,j] = Jin
+            for j in np.arange(int(n_particles/2), n_particles):
+                J[i,j] = Jout
+
+        for i in np.arange(int(n_particles/2), n_particles):
+            for j in range(i + 1, n_particles):
+                J[i,j] = Jin
+
+    if structure == "monomer": 
+        for i in range(int(n_particles)):
+            for j in range(i + 1, n_particles):
+                J[i,j] = Jin
+    
+  
+    J += J.T
+
+    if J.shape != (n_particles, n_particles):
+        raise ValueError("Exchange matrix J must have shape (n_particles, n_particles).")
+    print(J)
+    return J
+                
+Jmatrix = High_Spin_coupling(Jin, Jout, n_particles, structure = "monomer")
+
+
+def compute_eigenvalues(J_vals, exp_eigenvalues):
+    """
+    Computes eigenvalues of the Hamiltonian for given J values.
+    """
+    J1, J2, J3 = J_vals  # Extract J values (1, 2,..., n)
+    Jmatrix = High_Spin_coupling(Jin, n_particles, n_particles,structure = "monomer")
+    
+    basis = create_basis(n_particles)
+    ham = build_ham(basis, Jmatrix, n_particles, "heisenburg")
+
+    # Compute eigenvalues
+    eigenvalues, _ = np.linalg.eigh(ham)
+    print(eigenvalues)
+    # Normalize by shifting the lowest eigenvalue to zero
+    eigenvalues *= -1
+    eigenvalues = eigenvalues - eigenvalues[len(eigenvalues)-1]
+    eigenvalues = np.sort(eigenvalues)
+    return eigenvalues[:len(exp_eigenvalues)]  # Return only the relevant eigenvalues
+
+
+#%%
+# Objective function to minimize
+def calc_sum_sq(J_vals, exp_eigenvalues):
+    computed_eigenvalues = compute_eigenvalues(J_vals, exp_eigenvalues)
+    sum_sq = np.sum(np.square(np.array(computed_eigenvalues) - np.array(exp_eigenvalues)))
+    
+    print(f"Trying J-values: {J_vals} → Computed: {computed_eigenvalues}, Target: {exp_eigenvalues}, Error: {sum_sq:.6f}")
+    
+    return float(sum_sq)
+
+
+# Optimization function
+def determine_J_minimize(J_initial, exp_eigenvalues):
+    """
+    Uses scipy.optimize.minimize to refine Jin1, Jin2, and Jin3.
+    """
+    result = minimize(calc_sum_sq, J_initial, args=(exp_eigenvalues,), method="Nelder-Mead")
+    return result.x  # Return optimized J values
+
+# Experimental eigenvalues (in meV)
+exp_eigenvalues = []  
+
+# Initial guesses for Jin1, Jin2, Jin3
+J_initial = []
+
+
+# Run optimization
+best_J = determine_J_minimize(J_initial, exp_eigenvalues)

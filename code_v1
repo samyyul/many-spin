@@ -1,0 +1,363 @@
+%% import
+
+"Library imports" 
+
+import numpy as np
+import sympy as sp
+import scipy.optimize as opt
+from scipy.optimize import fmin
+import matplotlib.pyplot as plt
+import itertools #import itertools to create basis.
+from prettytable import PrettyTable
+np.set_printoptions(suppress=True)
+
+#%% build Hamiltonian
+
+def create_basis(n_particles):
+    """
+    Creates an array of vectors with dimension n
+    which have entries of either 1/2 or -1/2.
+    """
+    #2 spin states, with n_particles spins, use itertools.product to output all 2^n combinations.
+    u = 0.50000000000000
+    d = -0.50000000000000
+    spin_states = [u, d]
+    basis = []
+    basis_all = np.array(list(itertools.product(spin_states, repeat=n_particles)))
+    for i in range(len(basis_all)):
+        if np.sum(basis_all[i]) == 0: #even spin centres (Ms = 0 determinants)
+            basis.append(basis_all[i])
+        if np.sum(basis_all[i]) == 0.5: #odd spin centres (Ms = 1/2 determinants)
+            basis.append(basis_all[i])
+    return basis
+
+
+def SiSj_diag(ket, i, j, J):
+    """
+    Calculates the diagonal bilinear matrix element.
+    """
+    return ket[i] * ket[j] * J[i,j]
+
+def SiSj_off_diag(bra, ket, i, j, J):
+    """
+    calculates the off-diagonal bilinear matrix element
+    """
+    flipped_ket = ket.copy()
+    flipped_ket[i] *= -1
+    flipped_ket[j] *= -1
+    if (bra == flipped_ket).all():
+        return 0.5 * J[i,j]
+    else: 
+        return 0
+
+def Biquartic_SiSj_diag (ket, i, j, lam):
+    """
+    Calculates the biquadratic exchange term of diagonal bilinear matrix element.
+    """
+    return (ket[i] * ket[j])**2 * lam[i,j]
+
+def Biquadratic_SiSj_off_diag(bra, ket, i, j, lam):
+    """
+    Calculates the biquadratic exchange term of off-diagonal bilinear matrix element.
+    """
+    ket[i] = ket[i] * -1
+    ket[j] = ket[j] * -1
+    if (bra == ket).all(): 
+        return 0.5 * lam[i,j]
+    else:
+        return 0
+
+def build_ham(basis, J, n_particles, Ham_type):
+    """
+    Constructs the Hamiltonian.
+    """
+    ham = np.zeros((len(basis), len(basis)))
+    Ham_type = Ham_type.lower()
+    
+    if Ham_type == "heisenburg":
+        # Off-diagonal terms
+        for ham_row, bra in enumerate(basis):
+            for ham_col, ket in enumerate(basis[ham_row + 1:], start=ham_row + 1):
+                for i in range(n_particles):
+                    for j in range(i + 1, n_particles):
+                        ham[ham_row, ham_col] += SiSj_off_diag(bra, ket.copy(), i, j, J)
+        ham += ham.T  # Make symmetric
+    elif Ham_type == "ising":
+        pass 
+
+    # Diagonal terms
+    for ham_row, ket in enumerate(basis):
+        for i in range(n_particles):
+            for j in range(i + 1, n_particles):
+                ham[ham_row, ham_row] += SiSj_diag(ket, i, j, J)
+    return ham
+
+#%% 
+
+"Creation of J matrix"
+n_particles = 6 # number of particles
+
+#cm2mev = 0.124 - for cm-1 output
+#exchange coupling in meV
+Jout = 1.95 
+#Jin = 139.124944
+Jin = 200.67
+Jin2 = 208.145663
+Jin3 = 131.729393
+
+def High_Spin_coupling(Jin, Jout, n_particles, structure):
+    J = np.zeros((n_particles, n_particles))
+    if structure == "dimer":
+        for i in range(int(n_particles/2)):
+            for j in range(i + 1, int(n_particles/2)):
+                J[i,j] = Jin
+            for j in np.arange(int(n_particles/2), n_particles):
+                J[i,j] = Jout
+
+        for i in np.arange(int(n_particles/2), n_particles):
+            for j in range(i + 1, n_particles):
+                J[i,j] = Jin
+
+    if structure == "monomer": 
+        for i in range(int(n_particles)):
+            for j in range(i + 1, n_particles):
+                J[i,j] = Jin
+
+ J += J.T
+
+    if J.shape != (n_particles, n_particles):
+        raise ValueError("Exchange matrix J must have shape (n_particles, n_particles).")
+    print(J)
+    return J
+
+def Low_Spin_Coupling(Jin, Jin2, Jin3, n_particles):
+    J = np.zeros((n_particles, n_particles))
+    J[1,0] = Jin3
+    J[2,0] = Jin
+    J[2,1] = Jin2
+    J += J.T
+    print(J)
+    return J
+Jmatrix = High_Spin_coupling(Jin,Jout, n_particles, structure = "dimer")
+
+#%% Run the Program
+
+"Build a basis and a Hamiltonian, then diagonalise"
+
+basis = create_basis(n_particles)
+print("basis:",basis)
+print('Hamiltonian:')
+ham  = build_ham(basis, Jmatrix, n_particles, "heisenburg")
+if ham.shape != (len(basis),len(basis)):
+    raise ValueError("Hamiltonian matrix is assymetric")
+#print Hamiltonian
+H_Matrix = PrettyTable()
+num_states = len(ham)
+headers = ["State"] + [f"|ψ{i}⟩"for i in range(1, num_states + 1)] #header + ms values
+H_Matrix.field_names = headers
+for i, row in enumerate(ham):
+    H_Matrix.add_row([f"|ψ{i+1}⟩"] + row.tolist())
+print(H_Matrix)
+# Diagonalise the Hamiltonian.
+eigenvalues, eigenvectors = np.linalg.eigh(ham)
+
+# Reorder and display
+
+eigenvalues *= -1
+eigenvalues = eigenvalues - eigenvalues[len(eigenvalues)-1]
+eigenvectors = np.sort(eigenvectors)
+eigenvalues = np.sort(eigenvalues)
+for i, eigenvectors in enumerate(eigenvectors.T):
+    print(f"|ψ{i+1}⟩: {np.round(eigenvectors, 3)}")
+for i, eigenvalue in enumerate(eigenvalues):
+    print(f"E{i+1}: {eigenvalue:.1f} meV")
+
+#%% Present on Graphs
+
+"Graph 1"
+
+import matplotlib as mpl
+mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype'] = 42
+mpl.rc('font',**{'family':'sans-serif','sans-serif':['Arial']})
+mpl.rcParams['font.size'] = 20
+mpl.rcParams['axes.linewidth'] = 1.5
+mpl.rcParams['xtick.major.size'] = 6
+mpl.rcParams['xtick.major.width'] = 1.5
+mpl.rcParams['ytick.major.size'] = 6
+mpl.rcParams['ytick.major.width'] = 1.5
+colours = ["#00B828", "#FFD900", "#800FF2", "#0073FF", "#FF5000", "#B3B3B3"]
+# colours =  green  ,  yellow  ,   purple ,   blue   ,  orange  ,   grey
+
+tolerance = 1e-6
+# Group energies by their "rounded equivalence" within the tolerance
+grouped_values = {}
+for energy in eigenvalues:
+    # Find an existing group within tolerance
+    found = False
+    for key in grouped_values:
+        if abs(energy - key) <= tolerance:
+            grouped_values[key].append(energy)
+            found = True
+            break
+    if not found:
+        grouped_values[energy] = [energy]
+
+# Create a figure and axis
+fig, ax = plt.subplots(figsize=(6, 8))
+
+# Offset configuration
+spacing = 5  # Horizontal spacing between lines in a group
+label_y_offset = 0.001  # Vertical offset for labels
+x_offset = 1
+num_groups = len(grouped_values)
+
+# Plot each group
+for group_index, (key, group) in enumerate(grouped_values.items()):
+    # Calculate the central x-offset for the group
+    num_in_group = len(group)
+    group_offsets = np.linspace(-spacing * (num_in_group - 1) / 2, spacing * (num_in_group - 1) / 2, num_in_group)
+    
+
+    for energy, x_offset in zip(group, group_offsets):
+        # Plot the horizontal line
+        ax.hlines(energy, xmin=x_offset - 2, xmax=x_offset + 2, color='orange', linewidth=2)
+
+        # Add label above the line with a vertical offset
+        ax.text(
+            x_offset,
+            energy + label_y_offset,
+            f"{energy:.1f}",  # Adjusting precision for small values
+            ha="center",  # Center-align the text horizontally
+            va="bottom",  # Position text just above the line
+            color="black"
+        )
+
+# Labeling axes
+ax.set_xlabel(" Energy States")
+ax.set_ylabel("Energy / meV")
+
+# Adjust x-axis for alignment
+ax.set_xlim(-num_groups * 2, num_groups * 2)
+ax.set_xticks([])  # Remove x-axis ticks since states are spaced arbitrarily
+
+limset = (max(eigenvalues) - min(eigenvalues))/10
+# Adjust y-axis range dynamically
+ax.set_ylim(min(eigenvalues) - limset/5, max(eigenvalues) + limset)
+
+# Add gridlines for clarity
+ax.grid(True, linestyle="--", alpha=0.5)
+
+# Add a title
+ax.set_title("Title")
+
+# Tight layout
+plt.tight_layout()
+plt.show()
+
+# %% Example: Comparison of two geometries - 
+
+"Graph II"
+
+C1_energies = np.array([-1018.792422622, -1018.784951602, -1018.782270466])
+C3_energies = np.array([-1018.794363093, -1018.783314993])
+
+# Convert Hartree to eV
+C1_energies *= 27.2
+C3_energies *= 27.2
+
+# Find minimum energy
+min_E = np.min(C3_energies)
+
+# Normalize energies
+C1_energies -= min_E
+C3_energies -= min_E
+
+print(C1_energies)
+print(C3_energies)
+
+
+"graph 3"
+# Example eigenvalues for different systems (Monomer, Dimer, Trimer)
+eigenvalues_sets = {
+    "C3 Monomer": C3_energies,  # Replace with actual data
+    "C1 Monomer": C1_energies    # Replace with actual data
+
+}
+
+tolerance = 1e-6
+spacing = 8  # Horizontal spacing within each group
+label_y_offset = 0.001  # Vertical offset for labels
+group_spacing = 12  # Distance between Monomer, Dimer, Trimer
+
+limset = (max(C1_energies) - min(C1_energies))/5
+all_eigenvalues = np.concatenate(list(eigenvalues_sets.values()))
+
+# Create a figure and axis
+fig, ax = plt.subplots(figsize=(8, 8))
+
+# Plot each system separately
+for i, (system_name, eigenvalues) in enumerate(eigenvalues_sets.items()):
+    # Group energies by rounded equivalence within the tolerance
+    grouped_values = {}
+    for energy in eigenvalues:
+        found = False
+        for key in grouped_values:
+            if abs(energy - key) <= tolerance:
+                grouped_values[key].append(energy)
+                found = True
+                break
+        if not found:
+            grouped_values[energy] = [energy]
+
+    x_center = i * group_spacing  # Center position for this system
+
+    # Plot each energy level
+    for group_index, (key, group) in enumerate(grouped_values.items()):
+        num_in_group = len(group)
+        group_offsets = np.linspace(-spacing * (num_in_group - 1) / 2, 
+                                    spacing * (num_in_group - 1) / 2, 
+                                    num_in_group)
+
+        for energy, x_offset in zip(group, group_offsets):
+            # Plot horizontal lines
+            ax.hlines(energy, xmin=x_center + x_offset - 2, xmax=x_center + x_offset + 2, 
+                      color='blue', linewidth=2)
+            
+            # Add energy labels
+            ax.text(
+                x_center + x_offset,
+                energy + label_y_offset,
+                f"{energy:.3f}",
+                ha="center",
+                va="bottom",
+                color="black"
+            )
+
+    # Label each system below the x-axis
+    
+    ax.text(x_center, 0.01-limset, system_name, 
+            ha="center", va="top", fontweight="bold")
+
+# Labeling axes
+ax.set_ylabel("Energy / meV")
+
+# Adjust x-axis limits
+ax.set_xlim(-group_spacing, (len(eigenvalues_sets) - 1) * group_spacing + group_spacing)
+ax.set_xticks([])  # Remove x-axis ticks since we manually label systems
+
+# Adjust y-axis range dynamically
+limset = (max(eigenvalues) - min(eigenvalues))/10
+all_eigenvalues = np.concatenate(list(eigenvalues_sets.values()))
+ax.set_ylim(min(all_eigenvalues) - limset/2, max(all_eigenvalues) + limset)
+
+# Add gridlines
+ax.grid(True, linestyle="--", alpha=0.5)
+
+# Add title
+ax.set_title("Monomer Low Energy States")
+
+# Tight layout
+plt.tight_layout()
+plt.show()
+

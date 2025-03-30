@@ -1,0 +1,643 @@
+#%% import
+
+"Library imports / global settings" 
+
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import itertools
+from prettytable import PrettyTable
+import json
+import os
+
+np.set_printoptions(suppress=True)
+
+#%% 
+"""
+Input functions
+
+"""
+
+SAVE_FILE = "last_inputs.json"
+
+def load_last_inputs():
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return None
+    return None
+
+def save_last_inputs(data):
+    with open(SAVE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def cast_longdouble_maybe_list(value):
+    """Handle both single float or a list of floats."""
+    if isinstance(value, list):
+        return [np.longdouble(v) for v in value]
+    else:
+        return np.longdouble(value)
+
+def get_input(prompt, key, default_val=None):
+    """Return user input if provided, else the default."""
+    if default_val is not None:
+        user_in = input(f"{prompt} [{default_val}]: ").strip()
+    else:
+        user_in = input(f"{prompt}: ").strip()
+    return user_in if user_in else default_val
+
+def get_user_inputs():
+    last_inputs = load_last_inputs() or {}
+    
+    symmetry = get_input("Is coupling sym or asym", "symmetry", last_inputs.get("symmetry", "sym")).lower()
+    spin = get_input("Enter spin model - 3/2 or 1/2", "spin", last_inputs.get("spin", "1/2")).lower()
+
+    if spin == "1/2":
+        structure = get_input("Enter structure (dimer/monomer)", "structure", last_inputs.get("structure", "monomer")).lower()
+        if structure == "dimer" and n_particles % 2 != 0:
+            raise ValueError("Dimer must have even number of spins")
+
+        elif symmetry == "sym":
+            # Single J, but store as a list
+            default_jin = last_inputs.get("Jin", [0.0])  # store numeric
+            if isinstance(default_jin, float): 
+                default_jin = [default_jin]  # ensure it's a list
+            user_in = get_input("Enter Jin (meV)", "Jin", default_jin)
+            if isinstance(user_in, str):
+                Jin = [float(user_in)]
+            else:
+                Jin = user_in
+            # Jout
+            if structure == "dimer":
+                default_jout = last_inputs.get("Jout", 0.0)
+                user_jout = get_input("Enter Jout (meV)", "Jout", default_jout)
+                if isinstance(user_jout, str):
+                    Jout = float(user_jout)
+                else:
+                    Jout = user_jout
+            else:
+                Jout = 0.0
+        
+        elif symmetry == "asym":
+            # Possibly read how many from the user
+            num_default = len(last_inputs.get("Jin", []))
+            # or a default of 2, etc.
+            user_num = get_input(f"How many internal J's? (max {n_particles*(n_particles-1)//2})", 
+                                 "numJs", str(num_default))
+            try:
+                num_internal = int(user_num)
+            except ValueError:
+                num_internal = num_default or 1
+            Jin = []
+            default_jin_list = last_inputs.get("Jin", [])
+            for i in range(num_internal):
+                def_val = default_jin_list[i] if i < len(default_jin_list) else 0.0
+                val_str = get_input(f"Enter Jin {i+1} (meV)", f"Jin_{i+1}", str(def_val))
+                Jin.append(float(val_str))
+            if structure == "dimer":
+                default_jout = last_inputs.get("Jout", 0.0)
+                user_jout = get_input("Enter Jout (meV)", "Jout", default_jout)
+                if isinstance(user_jout, str):
+                    Jout = float(user_jout)
+                else:
+                    Jout = user_jout
+            else:
+                Jout = 0.0
+        else:
+            raise ValueError("Invalid symmetry input.")
+    
+    elif spin == "3/2":
+        structure = None
+        default_jout = last_inputs.get("Jout", 0.0)
+        user_jout = get_input("Enter Jout (meV)", "Jout", default_jout)
+        Jout = float(user_jout) if isinstance(user_jout, str) else user_jout
+        Jin = [0.0]
+    
+    else:
+        raise ValueError("Invalid spin input.")
+    
+    # Convert to np.longdouble
+    Jin = cast_longdouble_maybe_list(Jin)
+    Jout = np.longdouble(Jout)
+    
+    # Save the new inputs as numeric
+    save_last_inputs({
+        "Jin": [float(j) for j in Jin],
+        "Jout": float(Jout),
+        "spin": spin,
+        "symmetry": symmetry,
+        "structure": structure
+    })
+    
+    return {
+        'Jin': Jin,
+        'Jout': Jout,
+        'spin': spin,
+        'symmetry': symmetry,
+        'structure': structure
+    }    
+
+
+def High_Spin_coupling(Jin, Jout, n_particles, structure, symmetry):
+    """Generate the exchange coupling matrix for a high-spin system."""
+    J = np.zeros((n_particles, n_particles))
+    if symmetry == "sym":
+        Jin = Jin[0]
+        if structure == "dimer":
+            for i in range(int(n_particles / 2)):
+                for j in range(i + 1, int(n_particles / 2)):
+                    J[i, j] = Jin
+                for j in np.arange(int(n_particles / 2), n_particles):
+                    J[i, j] = Jout
+        
+            for i in np.arange(int(n_particles / 2), n_particles):
+                for j in range(i + 1, n_particles):
+                    J[i, j] = Jin
+
+        elif structure == "monomer":
+            for i in range(n_particles):
+                for j in range(i + 1, n_particles):
+                    J[i, j] = Jin
+
+        else:
+            raise ValueError("Invalid structure type. Use 'dimer' or 'monomer'.")
+        
+    elif symmetry == "asym":
+        if structure == "monomer":
+            if n_particles >= 3:
+                # Calculate the maximum number of coupling pairs for n_particles
+                expected_length = n_particles * (n_particles - 1) // 2
+                
+                # If more couplings are provided than expected, raise an error.
+                if len(Jin) != expected_length:
+                    raise ValueError(f"For asymmetric coupling, expected {expected_length} values but got {len(Jin)}.")
+                
+                # Define a default value for missing couplings.
+                # Here, we use the average of the provided couplings if any exist, otherwise 0.0.
+                default_value = sum(Jin) / len(Jin) if Jin else 0.0
+                
+                k = 0
+                for i in range(n_particles):
+                    for j in range(i + 1, n_particles):
+                        if k < len(Jin):
+                            J[i, j] = Jin[k]
+                        else:
+                            J[i, j] = default_value  # Fill in missing coupling with the default value.
+                        k += 1
+            else:
+                raise ValueError("Low-spin system requires at least 3 particles.")
+        
+        elif structure == "dimer":
+            k = 0
+            for i in range(int(n_particles / 2)):
+                for j in range(i + 1, int(n_particles / 2)):
+                    J[i, j] = Jin[k]
+                    k+=1
+                for j in np.arange(int(n_particles / 2), n_particles):
+                    J[i, j] = Jout
+        
+            for i in np.arange(int(n_particles / 2), n_particles):
+                for j in range(i + 1, n_particles):
+                    J[i, j] = Jin[k]
+                    k+=1
+        else:
+            raise ValueError("Invalid structure type. Use 'dimer' or 'monomer'.")
+    
+    else:
+        raise ValueError("Invalid symmetry type. Use 'sym' or 'asym'.")
+    
+    J += J.T  # Make symmetric
+    return J
+
+
+def Chain_coupling(Jout, n_particles):
+        """Generate exchange coupling matrix, modelling as a n-monomer chain of 3/2 spin particles"""
+        J = np.zeros((n_particles, n_particles))
+        for i in range(n_particles):
+            for j in range(i + 1, n_particles):
+                J[i, j] = Jout
+        J += J.T
+        return J
+
+
+def Define_J():
+    inputs = get_user_inputs()
+    Jin = inputs['Jin']
+    Jout = inputs['Jout']
+    spin = inputs['spin']
+    symmetry = inputs['symmetry']
+    structure = inputs['structure']
+
+    if spin == "1/2":
+        Jmatrix = High_Spin_coupling(Jin, Jout, n_particles, structure, symmetry)
+    elif spin == "3/2":
+        Jmatrix = Chain_coupling(Jout, n_particles)
+    else:
+        raise ValueError(f"Unsupported spin value: {spin}")
+    return Jmatrix, spin
+
+# if __name__ == "__main__":
+#     Define_J()
+
+
+
+
+#%% build Hamiltonian
+
+"Construction of Hamiltonian"
+
+
+def create_basis(n_particles, spin, full_basis=False, target_m=None):
+    """
+    Creates an array of basis vectors for a spin system with n_particles.
+    
+    Parameters:
+      n_particles : int
+          The number of spin particles.
+      spin : str, optional
+          The spin type; '1/2' or '3/2'. Default is '1/2'.
+      full_basis : bool, optional
+          Only used for spin '3/2'. If False, uses only the extreme states (±3/2);
+          if True, uses all four projections (3/2, 1/2, -1/2, -3/2).
+      target_m : number, optional
+          The target total m value for the basis vectors. If None, a default is chosen:
+          For spin 1/2: 0 if n_particles is even, 0.5 if odd.
+          For spin 3/2 with extreme states: 0 if even, 1.5 if odd.
+          (For a full spin 3/2 basis, you might want to supply target_m explicitly.)
+    
+    Returns:
+      numpy.ndarray
+          An array containing only those basis vectors that sum to target_m.
+    """
+    if spin == '1/2':
+        # For spin-1/2, the only possible states are ±1/2.
+        u = np.longdouble(0.5)
+        d = np.longdouble(-0.5)
+        spin_states = [u, d]
+        default_target = np.longdouble(0) if n_particles % 2 == 0 else np.longdouble(0.5)
+        
+    elif spin == '3/2':
+        if full_basis:
+            # For a full spin-3/2 representation, include all four possible projections.
+            spin_states = [
+                np.longdouble(1.5),
+                np.longdouble(0.5),
+                np.longdouble(-0.5),
+                np.longdouble(-1.5)
+            ]
+
+        else:
+            # For a reduced spin-3/2 basis, use only the extreme states.
+            spin_states = [
+                np.longdouble(1.5),
+                np.longdouble(-1.5)
+                ]
+        default_target = np.longdouble(0) if n_particles % 2 == 0 else np.longdouble(1.5)   
+
+    else:
+        raise ValueError("Unsupported spin type. Choose '1/2' or '3/2'.")
+    
+    if target_m is None:
+        target_m = default_target
+    
+    # Generate all combinations of the chosen spin states.
+    basis_all = np.array(list(itertools.product(spin_states, repeat=n_particles)), dtype=np.longdouble)
+    basis = []
+    
+    for spins in basis_all:
+        if np.sum(spins, dtype=np.longdouble) == np.longdouble(target_m):
+            basis.append(spins)
+            
+    return np.array(basis, dtype=np.longdouble)
+
+
+def create_visual_basis(n_particles):
+    """
+    Creates a visual representation of the basis
+    """
+    up = "↑"
+    down = "↓"
+    spin_states = [up, down]
+    visual_basis = []
+    visual_basis_all = list(itertools.product(spin_states, repeat=n_particles))
+
+    for state in visual_basis_all:
+        state_list = list(state)
+        # Count the number of up spins to determine total spin projection
+        Ms = state_list.count(up) - state_list.count(down)
+        
+        # Include only states with total spin projection Ms = 0 or 1/2
+        if Ms in [0, 1]:  
+            visual_basis.append(f"|{''.join(state_list)}⟩")
+    
+    return visual_basis
+
+def SiSj_diag(ket, i, j, J):
+    """
+    Calculates the diagonal bilinear matrix element.
+    """
+    return np.longdouble(ket[i]) * np.longdouble(ket[j]) * np.longdouble(J[i,j])
+
+def SiSj_off_diag(bra, ket, i, j, J):
+    """
+    calculates the off-diagonal bilinear matrix element
+    """
+    flipped_ket = ket.copy()
+    flipped_ket[i] *= -1
+    flipped_ket[j] *= -1
+    if (bra == flipped_ket).all():
+        return np.longdouble(0.5) * np.longdouble(J[i,j])
+    else: 
+        return 0
+
+
+def build_ham(basis, J, n_particles, Ham_type):
+    """
+    Constructs the Hamiltonian.
+    """
+    ham = np.zeros((len(basis), len(basis)), dtype=np.longdouble)
+    Ham_type = Ham_type.lower()
+    
+    if Ham_type == "heisenburg":
+        # Off-diagonal terms
+        for ham_row, bra in enumerate(basis):
+            for ham_col, ket in enumerate(basis[ham_row + 1:], start=ham_row + 1):
+                for i in range(n_particles):
+                    for j in range(i + 1, n_particles):
+                        ham[ham_row, ham_col] += SiSj_off_diag(bra, ket.copy(), i, j, J)
+        ham += ham.T  # Make symmetric
+    elif Ham_type == "ising":
+        pass 
+
+    # Diagonal terms
+    for ham_row, ket in enumerate(basis):
+        for i in range(n_particles):
+            for j in range(i + 1, n_particles):
+                ham[ham_row, ham_row] += SiSj_diag(ket, i, j, J)
+    return ham
+
+
+#%%
+
+"""
+
+S2 functions
+
+"""
+
+from itertools import combinations
+
+def create_full_basis(n_particles):
+    """
+    Creates the full computational basis for n spin-1/2 particles.
+    Each basis state is a tuple of (+0.5, -0.5) values.
+    Returns an array of shape (2**n_particles, n_particles).
+    """
+    return np.array(list(itertools.product([0.5, -0.5], repeat=n_particles)))
+
+
+def construct_pair_operator(basis):
+    """
+    Constructs the full matrix representation of the pairwise operator:
+      S_i · S_j = S_i^z S_j^z + 0.5 (S_i^+ S_j^- + S_i^- S_j^+)
+    summed over all unique pairs (i, j), in the full basis.
+    
+    Parameters:
+        basis (np.ndarray): The full computational basis of shape (n_states, n_particles).
+        
+    Returns:
+        pair_operator (np.ndarray): A matrix of shape (n_states, n_states).
+    """
+    n_states, n_particles = basis.shape
+    pair_operator = np.zeros((n_states, n_states))
+    
+    # Loop over all unique pairs of spins (i, j)
+    for i, j in combinations(range(n_particles), 2):
+        # Add the diagonal contribution for each basis state:
+        for m in range(n_states):
+            pair_operator[m, m] += basis[m, i] * basis[m, j]
+            #print(f"pair operation is: {pair_operator[m,m]}")
+        # Off-diagonal contributions: these connect basis states that differ only at indices i and j.
+        for m in range(n_states):
+            for n in range(n_states):
+                if m == n:
+                    continue
+                # Check if the two basis states are identical except at positions i and j.
+                other_indices = [k for k in range(n_particles) if k not in (i, j)]
+                if np.array_equal(basis[m, other_indices], basis[n, other_indices]):
+                    # For a valid flip, one state should have (i,j) = (0.5, -0.5) and the other (-0.5, 0.5).
+                    #rasiing lowering
+                    if (basis[m, i] == 0.5 and basis[m, j] == -0.5 and
+                        basis[n, i] == -0.5 and basis[n, j] == 0.5):
+                        pair_operator[m, n] += 0.5
+                    elif (basis[m, i] == -0.5 and basis[m, j] == 0.5 and
+                          basis[n, i] == 0.5 and basis[n, j] == -0.5):
+                        pair_operator[m, n] += 0.5
+    return pair_operator
+
+def construct_S2_operator(basis):
+    """
+    Constructs the full S^2 operator in the full Hilbert space.
+    
+    For N spin-1/2 particles:
+      S^2 = Σ_i S_i^2 + 2 Σ_{i<j} (S_i · S_j)
+    Each S_i^2 = 3/4.
+    
+    Parameters:
+        basis (np.ndarray): Full computational basis.
+        
+    Returns:
+        S2_operator (np.ndarray): The matrix representation of S^2.
+    """
+    n_states, n_particles = basis.shape
+    # Single-spin contribution: each S_i^2 = 3/4.
+    single_spin_term = (3/4) * n_particles * np.eye(n_states)
+    # Pairwise contributions.
+    pair_operator = construct_pair_operator(basis)
+    S2_operator = single_spin_term + 2 * pair_operator
+    return S2_operator
+
+#  # number of particles
+def S2_calculation(n_particles):
+
+    for x in [n_particles]:
+        basis = create_full_basis(n_particles)
+        S2_op = construct_S2_operator(basis)
+        #print(S2_op)
+        S2vals, eigvecs = np.linalg.eigh(S2_op)
+        # Sort eigenvalues for clarity.
+        S2vals = np.sort(np.round(S2vals, 3))
+        # print(f"\nFor n_particles = {n_particles}:")
+        # print("Eigenvalues of S^2 operator:", S2vals)
+
+    # This dictionary maps the rounded S^2 eigenvalue to a tuple:
+    # (multiplet name, intrinsic degeneracy = 2S+1)
+    state_mapping = {
+        0.0: ("Singlet", 1),
+        0.75: ("Doublet", 2),
+        2.0: ("Triplet", 3),
+        3.75: ("Quartet", 4),
+        6.0: ("Quintet", 5),
+        8.75: ("Sextet", 6),
+        12.0: ("Septet", 7),
+        15.75: ("Octet", 8),
+        20.00: ("Nonet", 9),
+        24.75: ("Decuplet", 10),
+        30.00: ("11-plet", 11),
+        35.75: ("Duodecuplet", 12),
+        42.00: ("13-plet", 13),
+        48.75: ("14-plet", 14),
+        56.00: ("15-plet", 15),
+        63.75: ("16-plet", 16),
+        72.00: ("17-plet", 17),
+        80.75: ("18-plet", 18),
+        90.00: ("19-plet", 19),
+        99.75: ("20-plet", 20),
+    }
+    # Round the eigenvalues to 2 decimals for robustness:
+    eigvals_rounded = np.round(S2vals, 2)
+
+    # Use np.unique to get unique eigenvalues and their counts.
+    unique_vals, counts = np.unique(eigvals_rounded, return_counts=True)
+
+    multiplet_list = []
+
+    # For each unique eigenvalue, determine how many multiplets are present.
+    for val, count in zip(unique_vals, counts):
+        if val in state_mapping:
+            multiplet_name, intrinsic_deg = state_mapping[val]
+            num_multiplets = count // intrinsic_deg
+            # Add the multiplet name as many times as needed.
+            for _ in range(num_multiplets):
+                multiplet_list.append(multiplet_name)
+        else:
+            multiplet_list.append("Unknown")
+    return multiplet_list
+
+
+
+       
+#%% Run the Program
+
+import numpy as np
+from prettytable import PrettyTable
+from scipy.linalg import eigh
+
+def print_basis(visual_basis):
+    """
+    Print the basis states in a clear format, three per line.
+    """
+    print("Basis:")
+    for i, state in enumerate(visual_basis, 1):
+        print(f"{state:15}", end=" ")  # Adjust spacing as needed
+        if i % 3 == 0:
+            print()  # New line after every three elements
+    print()  # Ensure the last line ends properly
+
+def print_hamiltonian(ham):
+    """
+    Create and print a formatted table for the Hamiltonian matrix.
+    """
+    num_states = len(ham)
+    headers = ["State"] + [f"|ψ{i}⟩" for i in range(1, num_states + 1)]
+    
+    table = PrettyTable()
+    table.field_names = headers
+    for i, row in enumerate(ham):
+        table.add_row([f"|ψ{i+1}⟩"] + list(row))
+    
+    print("\nHamiltonian:")
+    print(table)
+
+def print_exchange(Jmatrix):
+    """
+    Create and print a formatted table for the Exhcange matrix.
+    """
+    num_states = len(Jmatrix)
+    headers = ["Spin Centre"] + [f"{i}" for i in range(1, num_states + 1)]
+    
+    table = PrettyTable()
+    table.field_names = headers
+    for i, row in enumerate(Jmatrix):
+        table.add_row([f"{i+1}"] + list(row))
+    
+    print("\nTable of Exchange Couplings:")
+    print(table)
+
+
+def diagonalize_hamiltonian(ham):
+    """
+    Diagonalize the Hamiltonian matrix and process the eigenvalues/eigenvectors.
+    
+    Returns:
+        eigenvalues (np.array): Sorted eigenvalues (in meV).
+        eigenvectors (np.array): Corresponding eigenvectors.
+    """
+    # Convert Hamiltonian to float for diagonalization.
+    ham_float = ham.astype(np.float64)
+    eigenvalues, eigenvectors = eigh(ham_float, turbo=True)
+    # Adjust eigenvalues: multiply by -1 and set the smallest value to zero.
+    eigenvalues = -eigenvalues
+    eigenvalues = eigenvalues - eigenvalues[-1]
+    
+    # Sort eigenvalues and eigenvectors in descending order.
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+    
+    return eigenvalues, eigenvectors
+
+def main(n_particles):
+    """
+    Build the basis and Hamiltonian, print them, then diagonalize the Hamiltonian
+    and print the eigenvalues and eigenvectors.
+    """
+    Jmatrix, spin = Define_J()
+    start_time = time.time()
+    print(f"Number of {spin} particles: {n_particles}\n")
+    # Create basis and a visual representation of it.
+    basis = create_basis(n_particles, spin)
+    visual_basis = create_visual_basis(n_particles)
+    print_basis(visual_basis)
+
+    print_exchange(Jmatrix)
+
+    # Build the Hamiltonian matrix.
+    ham = build_ham(basis, Jmatrix, n_particles, "heisenburg")
+    
+    # Check if the Hamiltonian matrix is symmetric.
+    if ham.shape != (len(basis), len(basis)):
+        raise ValueError("Hamiltonian matrix is asymmetric")
+    
+    # Print the Hamiltonian matrix.
+    print_hamiltonian(ham)
+    
+    # Diagonalize the Hamiltonian.
+    eigenvalues, eigenvectors = diagonalize_hamiltonian(ham)
+    multiplet_list = S2_calculation(n_particles)
+    
+    # Print the eigenvectors with rounding.
+    print("\nEigenvectors:")
+    for i, vec in enumerate(eigenvectors.T):
+        print(f"|ψ{i+1}⟩: {np.round(vec, 3)}: {multiplet_list[i]}")
+    
+    # Print the eigenvalues.
+    print("\nEigenvalues (relative):")
+    for i, eigenvalue in enumerate(eigenvalues):
+        print(f"E{i+1}: {eigenvalue:.1f} meV")
+    
+    print("\n--- %s seconds ---" % (time.time() - start_time))
+
+if __name__ == "__main__":
+    """
+    
+    Define parameters for your simulation. 
+    NOTE: adjust n_particles when going from spin-1/2  to spin-3/2.
+    NOTE: For spin-3/2  confirm whether full basis is required.
+    
+    """
+    n_particles = 6
+    
+    main(n_particles)

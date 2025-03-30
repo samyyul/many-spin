@@ -1,0 +1,279 @@
+import numpy as np
+import itertools
+from scipy.optimize import minimize
+import json
+import os
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import matplotlib.ticker as ticker
+
+# Matplotlib configuration
+mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype'] = 42
+mpl.rc('font', **{'family': 'sans-serif','sans-serif': ['Arial']})
+mpl.rcParams['font.size'] = 20
+mpl.rcParams['axes.linewidth'] = 1.5
+mpl.rcParams['xtick.major.size'] = 6
+mpl.rcParams['xtick.major.width'] = 1.5
+mpl.rcParams['ytick.major.size'] = 6
+mpl.rcParams['ytick.major.width'] = 1.5
+plt.rcParams['text.usetex'] = False
+
+SAVE_FILE = "/tmp/last_inputs.json"
+colours = ["#00B828", "#FFD900", "#800FF2", "#0073FF", "#FF5000", "#B3B3B3"]
+
+# === Utility Functions for Saving/Loading Inputs ===
+def load_last_inputs():
+    if os.path.exists(SAVE_FILE):
+        with open(SAVE_FILE, "r") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return None
+    return None
+
+def save_last_inputs(data):
+    with open(SAVE_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def cast_longdouble_maybe_list(value):
+    if isinstance(value, list):
+        return [np.longdouble(v) for v in value]
+    else:
+        return np.longdouble(value)
+
+def get_input(prompt, default_val=None):
+    user_in = input(f"{prompt} [{default_val}]: ").strip()
+    return user_in if user_in else default_val
+
+# === Input Gathering ===
+def get_user_inputs(n_particles):
+    last_inputs = load_last_inputs() or {}
+    symmetry = get_input("Is coupling sym or asym", last_inputs.get("symmetry", "sym")).lower()
+    spin = get_input("Enter spin model - 3/2 or 1/2", last_inputs.get("spin", "1/2")).lower()
+    
+    if spin == "1/2":
+        structure = get_input("Enter structure (dimer/monomer)", last_inputs.get("structure", "monomer")).lower()
+        if structure == "dimer" and n_particles % 2 != 0:
+            raise ValueError("Dimer must have an even number of spins")
+        if symmetry == "sym":
+            if structure == "monomer":
+                if last_inputs.get("structure") == "dimer":
+                    default_jin = [0.0]
+                else:
+                    default_jin = last_inputs.get("Jvar", [0.0])
+                # Ensure default_jin is a list.
+                if not isinstance(default_jin, list):
+                    default_jin = [default_jin]
+                user_in = get_input("Enter Jin - variable to be optimised (meV)", default_jin[0])
+                Jvar = [float(user_in)]
+                Jfix = 0.0  # For monomer, no fixed coupling needed.
+            elif structure == "dimer":
+                if last_inputs.get("structure") == "monomer":
+                    default_jout = [0.0]
+                else:
+                    default_jout = last_inputs.get("Jvar", [0.0])
+            
+                default_jin = last_inputs.get("Jfix", [0.0])
+                if isinstance(default_jin, float):
+                    default_jin = [default_jin]
+                user_in = get_input("Enter Jin (for Dimer) (meV)", default_jin[0])
+
+                # If it's a list and the first element is a list, flatten it:
+                if isinstance(default_jout, list):
+                    if len(default_jout) > 0 and isinstance(default_jout[0], list):
+                        default_jout = default_jout[0]
+                    elif len(default_jout) == 1:
+                        default_jout = default_jout[0]
+
+                user_jout = get_input("Enter Jout - variable to be optimised (meV)", default_jout)
+                Jfix = [float(user_in)]
+                Jvar = [float(user_jout)]
+                
+            else:
+                raise ValueError("Invalid structure type. Use 'dimer' or 'monomer'.")
+        else:
+            raise ValueError("Only symmetric coupling is supported in this streamlined version.")
+    else:
+        raise ValueError("Invalid spin input.")
+
+    # Convert to high precision numbers
+    Jvar = cast_longdouble_maybe_list(Jvar)
+    Jfix = cast_longdouble_maybe_list(Jfix) if isinstance(Jfix, list) else np.longdouble(Jfix)
+
+    # Save new inputs
+    save_last_inputs({
+        "Jvar": [float(j) for j in Jvar] if isinstance(Jvar, list) else float(Jvar),
+        "Jfix": [float(j) for j in Jfix] if isinstance(Jfix, list) else float(Jfix),
+        "spin": spin,
+        "symmetry": symmetry,
+        "structure": structure
+    })
+
+    return {
+        'Jvar': Jvar,
+        'Jfix': Jfix,
+        'spin': spin,
+        'symmetry': symmetry,
+        'structure': structure
+    }
+
+# === Hamiltonian and Basis Functions ===
+def High_Spin_coupling(Jvar, Jfix, n_particles, structure):
+    J = np.zeros((n_particles, n_particles))
+    if structure == "dimer":
+        # Only the off-diagonal block gets the optimized Jin; rest is Jout or fixed
+        for i in range(int(n_particles / 2)):
+            for j in range(i + 1, int(n_particles / 2)):
+                J[i, j] = Jfix
+            for j in np.arange(int(n_particles / 2), n_particles):
+                J[i, j] = Jvar
+        for i in np.arange(int(n_particles / 2), n_particles):
+            for j in range(i + 1, n_particles):
+                J[i, j] = Jfix
+    elif structure == "monomer":
+        for i in range(n_particles):
+            for j in range(i + 1, n_particles):
+                J[i, j] = Jvar
+    else:
+        raise ValueError("Invalid structure type. Use 'dimer' or 'monomer'.")
+    return J + J.T
+
+def create_basis(n_particles):
+    u = np.longdouble(0.5)
+    d = np.longdouble(-0.5)
+    spin_states = [u, d]
+    basis = []
+    basis_all = np.array(list(itertools.product(spin_states, repeat=n_particles)), dtype=np.longdouble)
+    for spins in basis_all:
+        vec_sum = np.sum(spins, dtype=np.longdouble)
+        # Choose basis states according to total spin (example: zero or +0.5)
+        if vec_sum == np.longdouble(0) or vec_sum == np.longdouble(0.5):
+            basis.append(spins)
+    return np.array(basis, dtype=np.longdouble)
+
+def SiSj_diag(ket, i, j, J):
+    return np.longdouble(ket[i]) * np.longdouble(ket[j]) * np.longdouble(J[i, j])
+
+def SiSj_off_diag(bra, ket, i, j, J):
+    flipped_ket = ket.copy()
+    flipped_ket[i] *= -1
+    flipped_ket[j] *= -1
+    if (bra == flipped_ket).all():
+        return np.longdouble(0.5) * np.longdouble(J[i, j])
+    else:
+        return 0
+
+def build_ham(basis, J, n_particles, Ham_type):
+    ham = np.zeros((len(basis), len(basis)))
+    Ham_type = Ham_type.lower()
+    if Ham_type == "heisenburg":
+        # Off-diagonal elements
+        for ham_row, bra in enumerate(basis):
+            for ham_col, ket in enumerate(basis[ham_row + 1:], start=ham_row + 1):
+                for i in range(n_particles):
+                    for j in range(i + 1, n_particles):
+                        ham[ham_row, ham_col] += SiSj_off_diag(bra, ket.copy(), i, j, J)
+        ham += ham.T
+    # Diagonal elements
+    for ham_row, ket in enumerate(basis):
+        for i in range(n_particles):
+            for j in range(i + 1, n_particles):
+                ham[ham_row, ham_row] += SiSj_diag(ket, i, j, J)
+    return ham
+
+# === Eigenvalue and Optimization Functions ===
+def compute_eigenvalues(J_vals, exp_eigenvalues, n_particles, structure):
+    # For now, we assume J_vals is a list with a single optimized parameter.
+    Jin = J_vals[0]
+    # Use the high-spin coupling function to build the matrix
+    # (For monomers, Jout is not used; for dimers, you may pass it separately)
+    if structure == "dimer":
+        # Here, one might choose to keep Jout fixed (e.g., from user input) or set it to a constant.
+        Jmatrix = High_Spin_coupling(Jin, 200.67, n_particles, structure)
+    else:  # monomer
+        Jmatrix = High_Spin_coupling(Jin, 0.0, n_particles, structure)
+    
+    basis = create_basis(n_particles)
+    ham = build_ham(basis, Jmatrix, n_particles, "heisenburg")
+    eigenvalues, _ = np.linalg.eigh(ham)
+    # Normalize: shift so the lowest eigenvalue is zero and flip sign if desired
+    eigenvalues *= -1
+    eigenvalues = eigenvalues - eigenvalues[-1]
+    return np.sort(eigenvalues)[:len(exp_eigenvalues)]
+
+def calc_sum_sq(J_vals, exp_eigenvalues, n_particles, structure):
+    computed_eigenvalues = compute_eigenvalues(J_vals, exp_eigenvalues, n_particles, structure)
+    diff = np.array(computed_eigenvalues) - np.array(exp_eigenvalues)
+    sum_sq = np.sum(np.square(diff))
+    print(f"Trying J-values: {J_vals} → Computed: {computed_eigenvalues}, Target: {exp_eigenvalues}, Error: {sum_sq:.6f}")
+    return float(sum_sq)
+
+def callback(J_vals):
+    # For plotting progress (using global lists for simplicity)
+    global iteration_counter, j_iteration, iteration_val, error_history, exp_eigenvalues_global, n_particles_global, structure_global
+    computed_eigenvalues = compute_eigenvalues(J_vals, exp_eigenvalues_global, n_particles_global, structure_global)
+    sum_sq = np.sum(np.square(np.array(computed_eigenvalues) - np.array(exp_eigenvalues_global)))
+    j_iteration.append(J_vals[0])
+    iteration_val.append(iteration_counter)
+    error_history.append(sum_sq)
+    iteration_counter += 1
+
+def determine_J_minimize(J_initial, exp_eigenvalues, n_particles, structure, weights=None):
+    # If weights are provided, they can be used to weight the error (here not used in calc_sum_sq but available for extension)
+    options = {'xatol': 1e-8, 'fatol': 1e-8, 'maxiter': 1000, 'disp': True}
+    result = minimize(calc_sum_sq, J_initial, args=(exp_eigenvalues, n_particles, structure),
+                      method="Nelder-Mead", callback=callback, options=options)
+    return result.x
+
+#%%
+
+# === Main Program ===
+def main():
+    # Global variables for callback access
+    global iteration_counter, j_iteration, iteration_val, error_history, exp_eigenvalues_global, n_particles_global, structure_global
+    
+    # Set number of particles and experimental eigenvalues
+    n_particles = 6
+    exp_eigenvalues = [0,3.6, 5.3, 7.6]  # in meV
+
+    # Get user inputs at the very start
+    user_params = get_user_inputs(n_particles)
+    structure = user_params['structure']  # "monomer" or "dimer"
+    
+    # Set globals for use in the callback function (alternatively, you could refactor to avoid globals)
+    n_particles_global = n_particles
+    exp_eigenvalues_global = exp_eigenvalues
+    structure_global = structure
+    iteration_counter = 1
+    j_iteration = []
+    iteration_val = []
+    error_history = []
+
+    # Use the first Jin value from the user input as the starting guess for the optimization.
+    J_initial = [float(user_params['Jvar'][0])]
+
+    # Run the optimization routine
+    best_J = determine_J_minimize(J_initial, exp_eigenvalues, n_particles, structure)
+    print(f"\nOptimized J: {best_J[0]:.6f} meV")
+
+    # === Plotting the Optimization Progress ===
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('J value (meV)', color='tab:blue')
+    ax1.plot(iteration_val, j_iteration, marker='.', linestyle='-', color='tab:blue', label='J value')
+    ax1.xaxis.set_major_locator(ticker.IndexLocator(base=3, offset=0))
+    ax1.set_xlim(0, iteration_counter)
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Error', color='tab:red')
+    ax2.plot(iteration_val, error_history, marker='.', linestyle='-', color='tab:red', label='Error')
+    ax2.tick_params(axis='y', labelcolor='tab:red')
+
+    fig.tight_layout()
+    plt.title("Optimization Progress: J Value and Error Evolution")
+    plt.show()
+
+if __name__ == '__main__':
+    main()

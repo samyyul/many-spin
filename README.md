@@ -1,5 +1,5 @@
 # many-spin
-Continuing Project working on python script for determination of exchange couplings of many-spin systems. 
+## Continuing Project working on python script for determination of exchange couplings of many-spin systems. ##
 
 !! NOTE: FOR MCHEM work, see projects listed "MCHEM_..." !!
 

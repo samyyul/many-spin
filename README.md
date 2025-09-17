@@ -36,7 +36,7 @@ Following the initial success, EigOpt was extended into a **Flask-based web appl
 - interactive **visualisation** tool for exchange couplings.
   
 - Flexbility choice of variable(s) for optimisation.
-- 
+
 - Hosted on a university virtual machine, with ongoing development planned.  
 
 

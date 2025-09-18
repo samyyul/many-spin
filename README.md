@@ -39,6 +39,7 @@ Following the initial success, EigOpt was extended into a **Flask-based web appl
 
 - Hosted on a university virtual machine, with ongoing development planned.  
 
+Currently, the website is only accessible via the University of Manchester's Intranet.
 
 
 
